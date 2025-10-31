@@ -1,0 +1,108 @@
+{
+  "zones": [
+    [
+      {
+        "x": 551.164531763093,
+        "y": 57.84569064354574,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 561.5563092843001,
+        "y": 106.34065240917955,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 1138.2999617113016,
+        "y": 140.97991081320367,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 1140.0319246315028,
+        "y": 78.62924568596021,
+        "longitude": null,
+        "latitude": null
+      }
+    ],
+    [
+      {
+        "x": 56.41102278179817,
+        "y": 114.20515295970985,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 54.679059861596954,
+        "y": 160.83654001215442,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 550.8369714115801,
+        "y": 106.6110719095484,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 544.3669319640378,
+        "y": 51.76278315522541,
+        "longitude": null,
+        "latitude": null
+      }
+    ],
+    [
+      {
+        "x": 169.52439737187592,
+        "y": 44.25807238104331,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 181.51535881966535,
+        "y": 104.21287961999052,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 562.8279328593695,
+        "y": 65.84180298706431,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 565.2261251489274,
+        "y": 5.886995748117108,
+        "longitude": null,
+        "latitude": null
+      }
+    ],
+    [
+      {
+        "x": 577.2170865967169,
+        "y": 17.877957195906546,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 577.2170865967169,
+        "y": 63.44361069750642,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 1147.9868515114943,
+        "y": 99.41649504087474,
+        "longitude": null,
+        "latitude": null
+      },
+      {
+        "x": 1133.5976977741468,
+        "y": 39.46168780192754,
+        "longitude": null,
+        "latitude": null
+      }
+    ]
+  ]
+}
