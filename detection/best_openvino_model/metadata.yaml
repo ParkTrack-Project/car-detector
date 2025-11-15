@@ -1,6 +1,6 @@
-description: Ultralytics YOLOv12s model trained on /Users/nawinds/PycharmProjects/parktrack/car_detection/merge_datasets/roboflow_dataset/data.yaml
+description: Ultralytics YOLOv12s model trained on C:\Users\iakse\PycharmProjects\parktrack-train\merged_dataset\data.yaml
 author: Ultralytics
-date: '2025-10-29T14:57:08.870207'
+date: '2025-11-03T09:03:27.131181'
 version: 8.3.221
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com

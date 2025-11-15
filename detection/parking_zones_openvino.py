@@ -2,30 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-Пример:
-python parking_zones_openvino.py \
-  --model ./best_openvino_model/best.xml \
-  --source http://109.236.111.203/mjpg/video.mjpg \
-  --zones-json zones.json \
-  --duration 10 \
-  --imgsz 640 --conf 0.15 --iou 0.5 --show
+YOLO(OpenVINO) + ИЗОГНУТЫЕ парковочные зоны на ИСКАЖЁННОМ кадре.
+Цвет подписей совпадает с цветом зоны; добавлена легенда в левом нижнем углу.
 """
 
-import argparse, json, time, sys
+import argparse
+import sys
+import json
+import time
 from pathlib import Path
-from collections import deque
+from datetime import datetime
+
 import cv2
-import numpy as np
 import yaml
+import numpy as np
 from openvino import Core, Tensor
 
-# ---------- базовые утилы из твоего скрипта ----------
+# ------------------------
+# OpenVINO / YOLO utils
+# ------------------------
 
 def load_class_names(model_dir: Path):
     meta = model_dir / "metadata.yaml"
     if meta.exists():
         try:
-            data = yaml.safe_load(meta.read_text())
+            data = yaml.safe_load(meta.read_text(encoding="utf-8"))
             names = data.get("names") or data.get("classes") or None
             if isinstance(names, dict):
                 names = [names[k] for k in sorted(names.keys(), key=lambda x: int(x))]
@@ -35,441 +36,563 @@ def load_class_names(model_dir: Path):
             pass
     return ["car"]
 
-def letterbox(im, new_shape=640, color=(114,114,114)):
-    h, w = im.shape[:2]
+def letterbox(im, new_shape=640, color=(114, 114, 114)):
+    shape = im.shape[:2]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
-    r = min(new_shape[0] / h, new_shape[1] / w)
-    new_unpad = (int(round(w * r)), int(round(h * r)))
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
     dw /= 2; dh /= 2
-    if (w,h) != new_unpad:
+    if shape[::-1] != new_unpad:
         im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
-    top, bottom = int(round(dh-0.1)), int(round(dh+0.1))
-    left, right = int(round(dw-0.1)), int(round(dw+0.1))
-    im = cv2.copyMakeBorder(im, top,bottom,left,right, cv2.BORDER_CONSTANT, value=color)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
     return im, r, (dw, dh)
 
 def xywh_to_xyxy(x):
     y = np.empty_like(x)
-    y[:,0] = x[:,0] - x[:,2]/2
-    y[:,1] = x[:,1] - x[:,3]/2
-    y[:,2] = x[:,0] + x[:,2]/2
-    y[:,3] = x[:,1] + x[:,3]/2
+    y[:, 0] = x[:, 0] - x[:, 2] / 2
+    y[:, 1] = x[:, 1] - x[:, 3] / 2
+    y[:, 2] = x[:, 0] + x[:, 2] / 2
+    y[:, 3] = x[:, 1] + x[:, 3] / 2
     return y
 
 def nms(boxes, scores, iou_thres=0.5):
-    if len(boxes)==0:
+    if boxes is None or len(boxes) == 0:
         return []
-    x1,y1,x2,y2 = boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
-    areas = (x2-x1)*(y2-y1)
+    boxes = np.asarray(boxes, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    x1 = boxes[:,0]; y1 = boxes[:,1]; x2 = boxes[:,2]; y2 = boxes[:,3]
+    w = np.maximum(0.0, x2 - x1); h = np.maximum(0.0, y2 - y1)
+    areas = w * h
     order = scores.argsort()[::-1]
-    keep=[]
-    while order.size>0:
-        i=order[0]; keep.append(i)
-        if order.size==1: break
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        w = np.maximum(0.0, xx2-xx1); h = np.maximum(0.0, yy2-yy1)
-        inter = w*h
-        iou = inter/(areas[i] + areas[order[1:]] - inter + 1e-9)
-        inds = np.where(iou<=iou_thres)[0]
-        order = order[inds+1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
+        idxs = order[1:]
+        xx1 = np.maximum(x1[i], x1[idxs])
+        yy1 = np.maximum(y1[i], y1[idxs])
+        xx2 = np.minimum(x2[i], x2[idxs])
+        yy2 = np.minimum(y2[i], y2[idxs])
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        iou = inter / (areas[i] + areas[idxs] - inter + 1e-9)
+        remaining = np.where(iou <= iou_thres)[0]
+        order = order[remaining + 1]
     return keep
+
+def draw_box_with_alpha(frame, box, label_text, edge_color, fill_color=None, alpha=0.25, thickness=2):
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    x1 = max(0, x1); y1 = max(0, y1); x2 = min(frame.shape[1]-1, x2); y2 = min(frame.shape[0]-1, y2)
+    if fill_color is not None and x2 > x1 and y2 > y1:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), fill_color, -1)
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, dst=frame)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), edge_color, thickness)
+    if label_text:
+        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        # аутлайн
+        cv2.putText(frame, label_text, (x1 + 3, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
+        cv2.putText(frame, label_text, (x1 + 3, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, edge_color, 1, cv2.LINE_AA)
 
 def parse_with_embedded_nms(output_tensors, conf_thres):
     for t in output_tensors:
-        a = np.array(t.data if hasattr(t,"data") else t)
-        if a.ndim==3 and a.shape[-1]==6:
+        arr = t.data if hasattr(t, "data") else np.asarray(t)
+        a = np.array(arr)
+        if a.ndim == 3 and a.shape[-1] == 6:
             det = a[0]
-            if det.size==0:
+            if det.size == 0:
                 return np.empty((0,4)), np.empty((0,)), np.empty((0,))
-            boxes = det[:,:4]; scores = det[:,4]; cls_ids = det[:,5]
+            boxes = det[:, :4]; scores = det[:, 4]; cls_ids = det[:, 5]
             m = scores >= conf_thres
             return boxes[m], scores[m], cls_ids[m]
     return None
 
-def parse_raw_yolo_outputs(output_tensors, conf_thres, iou_thres, car_only=True, car_id=0):
-    arrays=[]
+def parse_raw_yolo_outputs(output_tensors, conf_thres, car_only=False, car_id=0, nms_iou=0.5):
+    arrays = []
     for t in output_tensors:
-        arrays.append(np.array(t.data if hasattr(t,"data") else t))
-    pred = max(arrays, key=lambda a:a.size)
-    if pred.ndim==3:
-        if pred.shape[0]==1 and pred.shape[1] >= 5:
-            pred = np.transpose(pred[0], (1,0))
-        elif pred.shape[0]==1 and pred.shape[2] >= 5:
+        arr = t.data if hasattr(t, "data") else np.asarray(t)
+        arrays.append(np.array(arr))
+    pred = max(arrays, key=lambda a: a.size)
+
+    if pred.ndim == 3:
+        if pred.shape[1] >= 5 and pred.shape[0] == 1:
+            pred = np.transpose(pred[0], (1, 0))
+        elif pred.shape[2] >= 5 and pred.shape[0] == 1:
             pred = pred[0]
-        elif pred.shape[0]==1 and pred.shape[1]==1:
+        elif pred.shape[0] == 1 and pred.shape[1] == 1:
             pred = pred[0,0]
-    if pred.ndim!=2 or pred.shape[1]<5:
-        raise RuntimeError("Unexpected model output shape")
-    boxes_xywh = pred[:,:4]
-    cls_scores = pred[:,4:]
+    elif pred.ndim != 2:
+        raise RuntimeError("Неизвестный формат выхода модели.")
+
+    if pred.shape[1] < 5:
+        raise RuntimeError("Выход модели не похож на YOLO-предсказания.")
+
+    boxes_xywh = pred[:, :4]
+    cls_scores = pred[:, 4:]
     cls_ids = np.argmax(cls_scores, axis=1)
     scores = cls_scores[np.arange(cls_scores.shape[0]), cls_ids]
+
     m = scores >= conf_thres
     boxes_xywh = boxes_xywh[m]; scores = scores[m]; cls_ids = cls_ids[m]
+
     if car_only:
-        car_mask = (cls_ids==car_id)
+        car_mask = (cls_ids == car_id)
         boxes_xywh = boxes_xywh[car_mask]; scores = scores[car_mask]; cls_ids = cls_ids[car_mask]
+
     boxes_xyxy = xywh_to_xyxy(boxes_xywh)
-    keep = nms(boxes_xyxy, scores, iou_thres=iou_thres)
-    if not keep: return np.empty((0,4)), np.empty((0,)), np.empty((0,))
+    keep = nms(boxes_xyxy, scores, iou_thres=nms_iou)
+    if len(keep) == 0:
+        return np.empty((0,4)), np.empty((0,)), np.empty((0,))
     keep = np.array(keep, dtype=int)
     return boxes_xyxy[keep], scores[keep], cls_ids[keep]
 
-# ---------- геометрия зон и рисование ----------
+# ------------------------
+# Calibration I/O
+# ------------------------
 
-def zones_from_json(path: Path):
-    data = json.loads(Path(path).read_text())
-    zs = []
-    for poly in data["zones"]:
-        pts = np.array([[p["x"], p["y"]] for p in poly], dtype=np.float32)
-        zs.append(pts)
-    return zs
+def load_calib(calib_path: Path):
+    data = json.loads(calib_path.read_text(encoding="utf-8"))
+    w = int(data["image_width"]); h = int(data["image_height"])
+    K = np.array(data["K"], dtype=np.float64)
+    D = np.array(data["D"], dtype=np.float64).reshape(-1,1)
+    newK = np.array(data["newK"], dtype=np.float64) if "newK" in data else None
+    balance = float(data.get("balance", 0.0))
+    return (w, h, K, D, newK, balance)
 
-def point_in_poly(cx, cy, poly_pts):
-    # poly_pts: np.float32 Nx2
-    res = cv2.pointPolygonTest(poly_pts.astype(np.float32), (float(cx), float(cy)), False)
-    return res >= 0  # внутри или на границе
+def compute_newK_fullview(w, h, K, D):
+    step = max(8, int(min(w, h) / 160))
+    xs = np.arange(0, w, step, dtype=np.float64)
+    ys = np.arange(0, h, step, dtype=np.float64)
+    border = []
+    for x in xs:
+        border += [[x,0.0],[x,h-1.0]]
+    for y in ys:
+        border += [[0.0,y],[w-1.0,y]]
+    border = np.array(border, dtype=np.float64)
+    und = cv2.fisheye.undistortPoints(border.reshape(-1,1,2), K, D, P=None).reshape(-1,2)
+    min_x, min_y = und[:,0].min(), und[:,1].min()
+    max_x, max_y = und[:,0].max(), und[:,1].max()
+    span_x = max(max_x - min_x, 1e-6)
+    span_y = max(max_y - min_y, 1e-6)
+    s = min((w-1)/span_x, (h-1)/span_y)
+    cx = -min_x*s
+    cy = -min_y*s
+    newK = np.array([[s,0.0,cx],[0.0,s,cy],[0.0,0.0,1.0]], dtype=np.float64)
+    return newK
 
-def draw_zones(frame, zones, colors=None):
-    h,w = frame.shape[:2]
-    if colors is None:
-        colors = [(0,180,255),(255,180,0),(0,255,180),(180,255,0)]
-    for i,poly in enumerate(zones):
-        pts = poly.reshape(-1,1,2).astype(np.int32)
-        cv2.polylines(frame, [pts], True, colors[i%len(colors)], 2)
-        cX = int(np.mean(poly[:,0])); cY = int(np.mean(poly[:,1]))
-        cv2.circle(frame, (cX,cY), 3, colors[i%len(colors)], -1)
-        cv2.putText(frame, f"Zone {i+1}", (cX+6,cY-6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
-        cv2.putText(frame, f"Zone {i+1}", (cX+6,cY-6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+# ------------------------
+# Curved zones from 4 anchors
+# ------------------------
 
-def draw_boxes(frame, boxes, scores, color=(0,255,0), label="car"):
-    for (x1,y1,x2,y2), s in zip(boxes, scores):
-        pct = int(round(float(s)*100))
-        txt = f"{label} {pct}%"
-        x1i,y1i,x2i,y2i = map(lambda v:int(round(v)), [x1,y1,x2,y2])
-        cv2.rectangle(frame, (x1i,y1i), (x2i,y2i), color, 2)
-        (tw, th), bl = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(frame, (x1i, max(0,y1i-th-6)), (x1i+tw+4, y1i), color, -1)
-        cv2.putText(frame, txt, (x1i+2, y1i-4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2, cv2.LINE_AA)
+def load_zones_orig(json_path: Path):
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    zones_raw = data.get("zones") or []
+    zones = [np.array([[p["x"], p["y"]] for p in z], dtype=np.float64) for z in zones_raw]
+    return zones, data.get("image_width"), data.get("image_height")
 
-# ---------- простой трекинг по IoU и статичность ----------
+def undistort_pixels_to_rectified(p_d, K, D, newK):
+    pts = np.asarray(p_d, dtype=np.float64).reshape(-1,1,2)
+    pr = cv2.fisheye.undistortPoints(pts, K, D, P=newK).reshape(-1,2)
+    return pr
 
-def box_iou(a, b):
-    # a,b: [x1,y1,x2,y2]
-    xx1 = max(a[0], b[0]); yy1 = max(a[1], b[1])
-    xx2 = min(a[2], b[2]); yy2 = min(a[3], b[3])
-    w = max(0.0, xx2-xx1); h = max(0.0, yy2-yy1)
-    inter = w*h
-    if inter<=0: return 0.0
-    area_a = (a[2]-a[0])*(a[3]-a[1])
-    area_b = (b[2]-b[0])*(b[3]-b[1])
-    return inter/(area_a+area_b-inter+1e-9)
+def rectified_to_distorted_pixels(p_r, K, D, newK):
+    pr = np.asarray(p_r, dtype=np.float64).reshape(-1,2)
+    ones = np.ones((pr.shape[0],1), dtype=np.float64)
+    homo = np.hstack([pr, ones])
+    inv_newK = np.linalg.inv(newK)
+    norm = (inv_newK @ homo.T).T[:, :2].reshape(-1,1,2)
+    pd = cv2.fisheye.distortPoints(norm, K, D).reshape(-1,2)
+    return pd
 
-class Track:
-    _next_id = 1
-    def __init__(self, box, ts, score):
-        self.id = Track._next_id; Track._next_id += 1
-        self.box = box.astype(np.float32)
-        self.score = float(score)
-        self.first_ts = ts
-        self.last_ts = ts
-        self.hits = 1
-        self.miss = 0
-        self.motion_buf = deque(maxlen=10)  # средняя |разница пикселей| по ROI
-        self.prev_roi_gray = None
+def densify_edge(p0, p1, n_samples):
+    t = np.linspace(0.0, 1.0, n_samples, dtype=np.float64).reshape(-1,1)
+    pts = (1.0 - t) * p0 + t * p1
+    return pts
 
-    def age(self, now): return now - self.first_ts
-    def seen_recently(self, now, grace): return (now - self.last_ts) <= grace
+def build_curved_polygon_from_anchors(anchors_px_distorted, K, D, newK, samples_per_edge=50):
+    a = np.asarray(anchors_px_distorted, dtype=np.float64)
+    pr = undistort_pixels_to_rectified(a, K, D, newK)
+    pts_curve = []
+    for i in range(len(pr)):
+        p0 = pr[i]
+        p1 = pr[(i+1) % len(pr)]
+        seg = densify_edge(p0, p1, samples_per_edge)
+        seg_d = rectified_to_distorted_pixels(seg, K, D, newK)
+        pts_curve.append(seg_d)
+    poly = np.vstack(pts_curve).astype(np.float32)
+    return poly
 
-def match_tracks(tracks, det_boxes, iou_thr=0.3):
-    # жадный матчинг по IoU
-    matches = []
-    if len(tracks)==0 or len(det_boxes)==0:
-        return matches, list(range(len(det_boxes))), list(range(len(tracks)))
-    iou_mat = np.zeros((len(tracks), len(det_boxes)), dtype=np.float32)
-    for i,tr in enumerate(tracks):
-        for j,db in enumerate(det_boxes):
-            iou_mat[i,j] = box_iou(tr.box, db)
-    used_tr=set(); used_db=set()
-    while True:
-        i,j = np.unravel_index(np.argmax(iou_mat), iou_mat.shape)
-        if iou_mat[i,j] < iou_thr: break
-        if i in used_tr or j in used_db:
-            iou_mat[i,j] = -1; continue
-        matches.append((i,j))
-        used_tr.add(i); used_db.add(j)
-        iou_mat[i,:] = -1; iou_mat[:,j] = -1
-    unmatched_dets = [j for j in range(len(det_boxes)) if j not in used_db]
-    unmatched_trks = [i for i in range(len(tracks)) if i not in used_tr]
-    return matches, unmatched_dets, unmatched_trks
+def point_in_poly_cv(point_xy, polygon_float32):
+    cnt = polygon_float32.reshape((-1,1,2)).astype(np.float32)
+    res = cv2.pointPolygonTest(cnt, (float(point_xy[0]), float(point_xy[1])), False)
+    return res >= 0
 
-def extract_roi(gray, box):
-    """Вернёт ROI (uint8) по боксу; None, если он пустой/вышел за границы."""
-    x1,y1,x2,y2 = [int(round(v)) for v in box]
-    x1 = max(0, min(x1, gray.shape[1]-1))
-    y1 = max(0, min(y1, gray.shape[0]-1))
-    x2 = max(0, min(x2, gray.shape[1]-1))
-    y2 = max(0, min(y2, gray.shape[0]-1))
-    if x2 - x1 < 3 or y2 - y1 < 3:
-        return None
-    roi = gray[y1:y2, x1:x2]
-    return roi
+def assign_zone_for_box(box, curved_polys, h_img, w_img, mode, w_center=1.0, w_overlap=2.0):
+    """
+    Возвращает (best_idx, depth_px, overlap_ratio, best_score).
+    mode: "center" | "depth" | "hybrid"
+    """
+    x1, y1, x2, y2 = box
+    cx = float((x1 + x2) * 0.5)
+    cy = float((y1 + y2) * 0.5)
+    center = (cx, cy)
+
+    best_idx = -1
+    best_score = -1.0
+    best_depth = 0.0
+    best_overlap = 0.0
+
+    for zi, poly in enumerate(curved_polys):
+        if mode == "center":
+            depth_px = signed_depth_to_polygon(center, poly)
+            score = depth_px
+            overlap = 0.0
+        elif mode == "depth":
+            depth_px = signed_depth_to_polygon(center, poly)
+            score = depth_px
+            overlap = 0.0
+        else:  # hybrid
+            depth_px = signed_depth_to_polygon(center, poly)
+            depth_norm = norm_depth_for_box(depth_px, box)
+            overlap = overlap_ratio_box_in_polygon(box, poly, h_img, w_img)
+            score = w_center * depth_norm + w_overlap * overlap
+
+        if score > best_score:
+            best_score = score
+            best_idx = zi
+            best_depth = depth_px
+            best_overlap = overlap
+
+    if best_score <= 0.0:
+        return -1, 0.0, 0.0, 0.0
+    return best_idx, best_depth, best_overlap, best_score
 
 
-# ---------- оценка capacity ----------
+# ------------------------
+# Viz helpers
+# ------------------------
 
-def estimate_capacity(zone_poly, parked_boxes, pack_k=0.68, fallback=8):
-    area_zone = abs(cv2.contourArea(zone_poly.astype(np.float32)))
-    if len(parked_boxes) == 0:
-        return fallback
-    areas = [(b[2]-b[0])*(b[3]-b[1]) for b in parked_boxes]
-    S_car = float(np.median(areas))
-    if S_car <= 0 or area_zone <= 0:
-        return fallback
-    cap = int(np.floor((area_zone * pack_k) / S_car))
-    # разумные границы
-    return int(max(1, min(1000, cap)))
+def vivid_palette(n):
+    base = [
+        (0, 180, 255), (0, 200, 0), (255, 0, 0), (180, 0, 180),
+        (0, 140, 255), (0, 255, 255), (255, 0, 180), (255, 255, 0),
+        (0, 100, 255), (255, 100, 0),
+    ]
+    return [base[i % len(base)] for i in range(n)]
 
-# ---------- основной пайплайн ----------
+def draw_polygon_outline(frame, polygon, color_bgr, thickness=2):
+    pts = polygon.reshape((-1,1,2)).astype(np.int32)
+    cv2.polylines(frame, [pts], isClosed=True, color=color_bgr, thickness=thickness)
+
+def put_text_outline(frame, text, org, color_bgr, scale=0.6, thick=1):
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), thick+2, cv2.LINE_AA)
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color_bgr, thick, cv2.LINE_AA)
+
+def draw_legend_bottom_left(frame, entries, colors, margin=10, padding=8, line_h=22, alpha=0.5):
+    """
+    entries: list[str], colors: list[(B,G,R)]
+    Рисует полупрозрачный чёрный бокс и строки легенды в левой нижней части кадра.
+    """
+    h, w = frame.shape[:2]
+    # вычислим ширину
+    widths = []
+    for t in entries:
+        (tw, th), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        widths.append(tw)
+    box_w = max(widths) + 2*padding
+    box_h = len(entries)*line_h + 2*padding
+
+    x0 = margin
+    y1 = h - margin
+    y0 = y1 - box_h
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0+box_w, y1), (0,0,0), -1)
+    cv2.addWeighted(overlay, alpha, frame, 1-alpha, 0, dst=frame)
+
+    # строки
+    y = y0 + padding + int(line_h*0.8)
+    for i, t in enumerate(entries):
+        put_text_outline(frame, t, (x0+padding, y), colors[i], scale=0.6, thick=1)
+        y += line_h
+
+def signed_depth_to_polygon(point_xy, polygon_float32):
+    """Положительная глубина (в пикселях) внутри полигона, 0 снаружи."""
+    cnt = polygon_float32.reshape((-1,1,2)).astype(np.float32)
+    d = cv2.pointPolygonTest(cnt, (float(point_xy[0]), float(point_xy[1])), True)
+    return max(0.0, float(d))  # снаружи = 0
+
+def overlap_ratio_box_in_polygon(box_xyxy, polygon_float32, full_h, full_w):
+    """
+    Доля площади прямоугольника, попавшая внутрь полигона ∈ [0..1].
+    Считаем аккуратно через растеризацию только в ограниченном ROI.
+    """
+    x1, y1, x2, y2 = box_xyxy
+    x1i = int(np.floor(max(0, min(x1, x2))))
+    x2i = int(np.ceil (min(full_w-1, max(x1, x2))))
+    y1i = int(np.floor(max(0, min(y1, y2))))
+    y2i = int(np.ceil (min(full_h-1, max(y1, y2))))
+    if x2i <= x1i or y2i <= y1i:
+        return 0.0
+
+    # ограничим полигон и бокс ROI
+    roi_w, roi_h = x2i - x1i + 1, y2i - y1i + 1
+    poly_roi = polygon_float32.copy()
+    poly_roi[:,0] -= x1i
+    poly_roi[:,1] -= y1i
+
+    mask_poly = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    cv2.fillPoly(mask_poly, [poly_roi.astype(np.int32)], 255)
+
+    mask_box = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    cv2.rectangle(mask_box, (int(round(x1 - x1i)), int(round(y1 - y1i))),
+                              (int(round(x2 - x1i)), int(round(y2 - y1i))), 255, -1)
+
+    inter = cv2.countNonZero(cv2.bitwise_and(mask_poly, mask_box))
+    box_area = cv2.countNonZero(mask_box)
+    if box_area <= 0:
+        return 0.0
+    return float(inter) / float(box_area)
+
+def norm_depth_for_box(depth_px, box_xyxy):
+    """Нормируем глубину на характерный размер бокса (чтобы быть сопоставимой с overlap)."""
+    w = max(1.0, float(box_xyxy[2] - box_xyxy[0]))
+    h = max(1.0, float(box_xyxy[3] - box_xyxy[1]))
+    diag = (w*w + h*h)**0.5
+    return float(depth_px) / diag  # ~[0..~0.5]
+
+
+# ------------------------
+# Main (ONE FRAME)
+# ------------------------
 
 def main():
-    ap = argparse.ArgumentParser("Parking zones by OpenVINO YOLO")
-    ap.add_argument("--model", required=True, type=str, help="OpenVINO IR .xml")
-    ap.add_argument("--source", required=True, type=str, help="video/mjpeg/hls url or file")
-    ap.add_argument("--zones-json", required=True, type=str, help="JSON с полями zones -> список из 4хточечных полигонов")
+    ap = argparse.ArgumentParser(description="YOLO + Curved parking zones on distorted image (one frame)")
+    ap.add_argument("--model", required=True, help="OpenVINO model.xml")
+    ap.add_argument("--source", required=True, help="URL/Path to video/image")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--device", type=str, default="AUTO")
     ap.add_argument("--conf", type=float, default=0.15)
-    ap.add_argument("--iou", type=float, default=0.5)
-    ap.add_argument("--duration", type=float, default=10.0, help="сколько секунд собирать данные")
-    ap.add_argument("--fps", type=float, default=3.0, help="целевая частота обработки")
-    ap.add_argument("--dwell", type=float, default=8.0, help="минимум секунд, чтобы считать припаркованным")
-    ap.add_argument("--static_thr", type=float, default=3.0, help="макс средняя |разница яркости| (0..255) для статичности")
-    ap.add_argument("--grace", type=float, default=4.0, help="секунд держать трек без детекций")
-    ap.add_argument("--miss_max", type=int, default=10, help="сколько кадров подряд без матчей живёт трек")
+    ap.add_argument("--car_only", action="store_true")
+    ap.add_argument("--zones", required=True, help="JSON with zones (anchors on distorted image)")
+    ap.add_argument("--calib", required=True, help="Calibration JSON (K,D and optionally newK)")
+    ap.add_argument("--samples-per-edge", type=int, default=60, help="Sampling density for curved edges")
+    ap.add_argument("--zone_thickness", type=int, default=2)
+    ap.add_argument("--car_alpha", type=float, default=0.25)
+    ap.add_argument("--out_img", default="")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--assign", choices=["center", "depth", "hybrid"], default="hybrid",
+                    help="Способ выбора зоны: center=первая, глубина центра; depth=макс. глубина; hybrid=глубина+процент площади")
+    ap.add_argument("--w_center", type=float, default=1.0, help="Вес глубины центра для hybrid")
+    ap.add_argument("--w_overlap", type=float, default=2.0, help="Вес доли площади для hybrid")
+
     args = ap.parse_args()
 
-    model_xml = Path(args.model).expanduser().resolve()
-    if not model_xml.exists():
-        print(f"[ERR] model xml not found: {model_xml}", file=sys.stderr); sys.exit(1)
+    # --- Calibration ---
+    calib_path = Path(args.calib).expanduser().resolve()
+    if not calib_path.exists():
+        print(f"[ERR] calib not found: {calib_path}", file=sys.stderr); sys.exit(1)
+    cw, ch, K, D, newK_opt, _ = load_calib(calib_path)
 
-    zones = zones_from_json(Path(args.zones_json))
-    if len(zones)==0:
-        print("[ERR] zones empty", file=sys.stderr); sys.exit(2)
-
-    # маски зон для быстрого ROI
-    zone_masks = []
-    frame_probe = None
-
-    # OpenVINO
-    ie = Core()
-    model = ie.read_model(str(model_xml))
-    compiled = ie.compile_model(model, args.device)
-    input_tensor = compiled.inputs[0]
-
-    # Video
+    # --- Read first frame ---
     cap = cv2.VideoCapture(args.source, cv2.CAP_FFMPEG)
     if not cap.isOpened():
-        print(f"[ERR] cannot open source: {args.source}", file=sys.stderr); sys.exit(3)
-
-    # подготовим размеры кадра
-    ok, frame = cap.read()
-    if not ok or frame is None:
-        print("[ERR] cannot read first frame", file=sys.stderr); sys.exit(4)
-    H, W = frame.shape[:2]
-    frame_probe = frame.copy()
-    for poly in zones:
-        mask = np.zeros((H, W), dtype=np.uint8)
-        cv2.fillPoly(mask, [poly.reshape(-1,1,2).astype(np.int32)], 255)
-        zone_masks.append(mask)
-
-    # Треки по зонам
-    zone_tracks = [[] for _ in zones]  # список списков Track
-    parked_ids_by_zone = [set() for _ in zones]
-
-    t_end = time.time() + args.duration
-    next_tick = 0.0
-    last_gray = cv2.cvtColor(frame_probe, cv2.COLOR_BGR2GRAY)
-
-    last_frame_to_show = frame_probe.copy()
-    total_processed = 0
-
-    while time.time() < t_end:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            # попытка переподключиться
-            cap.release(); time.sleep(0.5)
-            cap = cv2.VideoCapture(args.source, cv2.CAP_FFMPEG)
-            if not cap.isOpened(): break
-            continue
-
-        now = time.time()
-        if next_tick > now:
-            # пропускаем кадры до следующего такта
-            continue
-        next_tick = now + 1.0/max(0.1, args.fps)
-
-        H, W = frame.shape[:2]
-        img, r, (dw,dh) = letterbox(frame, args.imgsz)
-        img_rgb = img[:, :, ::-1].astype(np.float32)/255.0
-        if input_tensor.element_type.type_name == "f16":
-            img_rgb = img_rgb.astype(np.float16)
-        else:
-            img_rgb = img_rgb.astype(np.float32)
-        img_nchw = np.transpose(img_rgb, (2,0,1))[None, ...]
-
-        # infer
-        req = compiled.create_infer_request()
-        req.set_tensor(compiled.inputs[0], Tensor(img_nchw))
-        req.infer()
-        outputs = [req.get_tensor(o) for o in compiled.outputs]
-
-        parsed = parse_with_embedded_nms(outputs, conf_thres=args.conf)
-        if parsed is None:
-            boxes, scores, cls_ids = parse_raw_yolo_outputs(outputs, args.conf, args.iou, car_only=True, car_id=0)
-        else:
-            boxes, scores, cls_ids = parsed
-            m = (cls_ids.astype(int)==0)
-            boxes, scores = boxes[m], scores[m]
-
-        # rescale boxes back
-        if boxes.shape[0] > 0:
-            boxes[:,[0,2]] -= dw; boxes[:,[1,3]] -= dh
-            boxes[:,:4] /= r
-            boxes[:,0::2] = boxes[:,0::2].clip(0, W-1)
-            boxes[:,1::2] = boxes[:,1::2].clip(0, H-1)
-
-        # фильтрация по зонам и трекинг
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # подготовим рисование
-        canvas = frame.copy()
-        draw_zones(canvas, zones)
-
-        # распределим детекции по зонам по центру бокса
-        dets_by_zone = [[] for _ in zones]
-        scores_by_zone = [[] for _ in zones]
-        for b,s in zip(boxes, scores):
-            cx = 0.5*(b[0]+b[2]); cy = 0.5*(b[1]+b[3])
-            for zi, poly in enumerate(zones):
-                if point_in_poly(cx, cy, poly):
-                    dets_by_zone[zi].append(b.copy())
-                    scores_by_zone[zi].append(float(s))
-                    break
-
-        # обновим треки по зонам
-        for zi, (poly, mask) in enumerate(zip(zones, zone_masks)):
-            tracks = zone_tracks[zi]
-            dets = dets_by_zone[zi]
-            scs = scores_by_zone[zi]
-
-            # матчинг
-            matches, um_det, um_tr = match_tracks(tracks, dets, iou_thr=0.3)
-
-            # обновить сматченные
-            # обновить сматченные
-            for ti, dj in matches:
-                tr = tracks[ti]
-                tr.box = dets[dj].astype(np.float32)
-                tr.score = max(tr.score, scs[dj])
-                tr.last_ts = now
-                tr.hits += 1
-                tr.miss = 0
-
-                # безопасный расчёт "статичности"
-                roi_new = extract_roi(gray, tr.box)
-                if roi_new is not None and tr.prev_roi_gray is not None:
-                    prev = tr.prev_roi_gray
-                    # приводим прошлый ROI к размеру текущего
-                    if prev.shape != roi_new.shape:
-                        prev = cv2.resize(prev, (roi_new.shape[1], roi_new.shape[0]), interpolation=cv2.INTER_AREA)
-                    # средняя |разница| яркости
-                    d = float(cv2.absdiff(roi_new, prev).mean())
-                    tr.motion_buf.append(d)
-                tr.prev_roi_gray = roi_new
-
-            # создать новые треки
-            for dj in um_det:
-                tr = Track(dets[dj], now, scs[dj])
-                tr.prev_roi_gray = extract_roi(gray, tr.box)
-                tracks.append(tr)
-
-            # увеличить miss у непромаченных, удалить умершие
-            new_tracks=[]
-            for idx,tr in enumerate(tracks):
-                if idx in [t for t,_ in matches]:
-                    new_tracks.append(tr); continue
-                tr.miss += 1
-                if tr.miss <= args.miss_max and tr.seen_recently(now, args.grace):
-                    new_tracks.append(tr)
-            zone_tracks[zi] = new_tracks
-
-            # определим припаркованные
-            parked = []
-            for tr in zone_tracks[zi]:
-                age_ok = tr.age(now) >= args.dwell
-                motion_ok = (len(tr.motion_buf)>0 and np.mean(tr.motion_buf) <= args.static_thr)
-                if age_ok and motion_ok:
-                    parked.append(tr)
-
-            parked_ids_by_zone[zi] = set([tr.id for tr in parked])
-
-            # рисование
-            # все текущие детекции:
-            if len(dets)>0:
-                draw_boxes(canvas, np.array(dets), np.array(scs), color=(0,255,0), label="car")
-            # треки припаркованных
-            for tr in parked:
-                x1,y1,x2,y2 = [int(round(v)) for v in tr.box]
-                cv2.rectangle(canvas, (x1,y1), (x2,y2), (0,128,255), 2)
-                txt = f"id{tr.id} parked {int(tr.age(now))}s, motion={np.mean(tr.motion_buf):.1f}"
-                cv2.putText(canvas, txt, (x1, max(0,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3, cv2.LINE_AA)
-                cv2.putText(canvas, txt, (x1, max(0,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
-
-            # подписи зоны: capacity/occupied/free
-            parked_boxes = [tr.box for tr in zone_tracks[zi] if tr.id in parked_ids_by_zone[zi]]
-            capacity = estimate_capacity(poly, parked_boxes, pack_k=0.68, fallback=8)
-            occ = len(parked_ids_by_zone[zi])
-            free = max(0, capacity - occ)
-            # центр для подписи
-            cX = int(np.mean(poly[:,0])); cY = int(np.mean(poly[:,1]))
-            txt = f"Z{zi+1}: occ={occ} free={free} cap={capacity}"
-            cv2.putText(canvas, txt, (cX+6, cY+18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
-            cv2.putText(canvas, txt, (cX+6, cY+18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-
-        last_frame_to_show = canvas
-        total_processed += 1
-
+        print(f"[ERR] cannot open source: {args.source}", file=sys.stderr); sys.exit(2)
+    frame = None
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        ok, fr = cap.read()
+        if ok and fr is not None:
+            frame = fr; break
+        time.sleep(0.05)
     cap.release()
+    if frame is None:
+        print("[ERR] failed to read frame", file=sys.stderr); sys.exit(3)
+    h0, w0 = frame.shape[:2]
 
-    # финальная статистика
-    results = []
-    for zi, poly in enumerate(zones):
-        parked = [tr for tr in zone_tracks[zi] if tr.id in parked_ids_by_zone[zi]]
-        boxes = [tr.box for tr in parked]
-        capz = estimate_capacity(poly, boxes, pack_k=0.68, fallback=8)
-        occ = len(parked)
-        free = max(0, capz - occ)
-        results.append({
-            "zone": zi+1,
-            "occupied": int(occ),
-            "free": int(free),
-            "capacity_est": int(capz)
-        })
+    if (cw != w0) or (ch != h0):
+        sx = w0 / cw; sy = h0 / ch
+        K = K.copy()
+        K[0,0] *= sx; K[1,1] *= sy
+        K[0,2] *= sx; K[1,2] *= sy
 
-    # выводим статистику в консоль
-    print(json.dumps({"zones": results, "processed_frames": total_processed}, ensure_ascii=False, indent=2))
+    newK = newK_opt if newK_opt is not None else compute_newK_fullview(w0, h0, K, D)
 
-    # показываем последний кадр
-    if args.show and last_frame_to_show is not None:
-        cv2.imshow("Parking analysis (press any key)", last_frame_to_show)
-        cv2.waitKey(0)
+    # --- Zones (anchors on distorted image) -> curved polygons ---
+    zones_path = Path(args.zones).expanduser().resolve()
+    if not zones_path.exists():
+        print(f"[ERR] zones json not found: {zones_path}", file=sys.stderr); sys.exit(1)
+    zones_anchors, _, _ = load_zones_orig(zones_path)
+
+    curved_polys = []
+    for z in zones_anchors:
+        poly = build_curved_polygon_from_anchors(
+            z, K, D, newK, samples_per_edge=max(8, args.samples_per_edge)
+        )
+        curved_polys.append(poly)
+
+    zone_colors = vivid_palette(len(curved_polys))
+    zone_ids = [i+1 for i in range(len(curved_polys))]
+
+    # --- OpenVINO inference (one frame) ---
+    model_xml = Path(args.model).expanduser().resolve()
+    if not model_xml.exists():
+        print(f"[ERR] model.xml not found: {model_xml}", file=sys.stderr); sys.exit(1)
+    names = load_class_names(model_xml.parent)
+    car_id = 0
+
+    ie = Core()
+    model = ie.read_model(model=model_xml)
+    compiled = ie.compile_model(model=model, device_name=args.device)
+    input_tensor = compiled.inputs[0]
+
+    img, r, (dw, dh) = letterbox(frame, new_shape=args.imgsz)
+    img = img[:, :, ::-1].astype(np.float32) / 255.0
+    if input_tensor.element_type.type_name == "f16":
+        img = img.astype(np.float16)
+    else:
+        img = img.astype(np.float32)
+    img = np.transpose(img, (2, 0, 1))[None, ...]
+
+    infer_req = compiled.create_infer_request()
+    infer_req.set_tensor(compiled.inputs[0], Tensor(img))
+    infer_req.infer()
+    outputs = [infer_req.get_tensor(o) for o in compiled.outputs]
+
+    parsed = parse_with_embedded_nms(outputs, conf_thres=args.conf)
+    if parsed is None:
+        boxes, scores, cls_ids = parse_raw_yolo_outputs(
+            outputs, conf_thres=args.conf,
+            car_only=args.car_only or (len(names)==1 and names[0].lower()=="car"),
+            car_id=car_id, nms_iou=0.5
+        )
+    else:
+        boxes, scores, cls_ids = parsed
+        if args.car_only or (len(names)==1 and names[0].lower()=="car"):
+            m = (cls_ids.astype(int) == car_id)
+            boxes, scores, cls_ids = boxes[m], scores[m], cls_ids[m]
+
+    if boxes.shape[0] > 0:
+        boxes[:, [0, 2]] -= dw
+        boxes[:, [1, 3]] -= dh
+        boxes[:, :4] /= r
+        boxes[:, 0::2] = boxes[:, 0::2].clip(0, w0 - 1)
+        boxes[:, 1::2] = boxes[:, 1::2].clip(0, h0 - 1)
+
+    # --- Zone accounting with CURVED polygons (depth/overlap aware) ---
+    zone_stats = [{"id": int(zone_ids[i]), "occupied": 0, "cars": []} for i in range(len(curved_polys))]
+    car_zone_index = [-1] * boxes.shape[0]
+
+    for i, (box, sc, cid) in enumerate(zip(boxes, scores, cls_ids)):
+        cx = float((box[0] + box[2]) * 0.5)
+        cy = float((box[1] + box[3]) * 0.5)
+        center = (cx, cy)
+
+        best_idx = -1
+        best_score = -1.0
+
+        for zi, poly in enumerate(curved_polys):
+            if args.assign == "center":
+                # старая логика, но выбираем наибольшую глубину, а не первую зону
+                depth_px = signed_depth_to_polygon(center, poly)
+                score = depth_px
+            elif args.assign == "depth":
+                depth_px = signed_depth_to_polygon(center, poly)
+                score = depth_px
+            else:
+                # hybrid: глубина центра (нормированная) + доля площади бокса в зоне
+                depth_px = signed_depth_to_polygon(center, poly)  # >=0 внутри, 0 снаружи
+                depth_norm = norm_depth_for_box(depth_px, box)  # ~[0..]
+                overlap = overlap_ratio_box_in_polygon(box, poly, h0, w0)  # [0..1]
+                score = args.w_center * depth_norm + args.w_overlap * overlap
+
+            if score > best_score:
+                best_score = score
+                best_idx = zi
+
+        # если вообще нет вклада (снаружи всех зон и пересечений нет) — оставим без зоны
+        if best_score <= 0.0:
+            assigned = -1
+        else:
+            assigned = best_idx
+
+        car_zone_index[i] = assigned
+        if assigned >= 0:
+            zone_stats[assigned]["occupied"] += 1
+            zone_stats[assigned]["cars"].append({
+                "det_index": i,
+                "center": [cx, cy],
+                "box": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+                "score": float(sc),
+                "class_id": int(cid),
+                "depth_px": float(signed_depth_to_polygon(center, curved_polys[assigned])),
+                "overlap_ratio": float(overlap_ratio_box_in_polygon(box, curved_polys[assigned], h0, w0))
+            })
+
+    # --- Visualization ---
+    for zi, poly in enumerate(curved_polys):
+        color = zone_colors[zi]
+        draw_polygon_outline(frame, poly, color_bgr=color, thickness=args.zone_thickness)
+        # подпись тем же цветом (с аутлайном) около «центра тяжести» дискретной кривой
+        cxy = np.mean(poly, axis=0)
+        label = f"Zone {zone_ids[zi]}: {zone_stats[zi]['occupied']}"
+        tx, ty = int(round(cxy[0])), int(round(cxy[1]))
+        put_text_outline(frame, label, (max(0, tx - 40), max(12, ty)), color)
+
+    # боксы машин
+    for i, (box, sc, cid) in enumerate(zip(boxes, scores, cls_ids)):
+        label_name = names[int(cid)] if 0 <= int(cid) < len(names) else str(int(cid))
+        pct = int(round(float(sc) * 100))
+        label_text = f"{label_name} {pct}%"
+        zi = car_zone_index[i]
+        if zi >= 0:
+            edge = zone_colors[zi]; fill = zone_colors[zi]
+            draw_box_with_alpha(frame, box, label_text, edge_color=edge, fill_color=fill,
+                                alpha=args.car_alpha, thickness=2)
+        else:
+            draw_box_with_alpha(frame, box, label_text, edge_color=(0,255,0),
+                                fill_color=None, alpha=0.0, thickness=2)
+        cx = int(round((box[0] + box[2]) * 0.5)); cy = int(round((box[1] + box[3]) * 0.5))
+        cv2.circle(frame, (cx, cy), 3, (0,0,0), -1); cv2.circle(frame, (cx, cy), 2, (255,255,255), -1)
+
+    # --- Legend (bottom-left) ---
+    legend_entries = [f"Zone {z['id']}: {z['occupied']}" for z in zone_stats]
+    draw_legend_bottom_left(frame, legend_entries, zone_colors, margin=10, padding=8, line_h=22, alpha=0.5)
+
+    # --- JSON ---
+    out = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "source": str(args.source),
+        "zones": zone_stats,
+        "totals": {
+            "cars_detected": int(boxes.shape[0]),
+            "cars_in_zones": int(sum(z["occupied"] for z in zone_stats))
+        },
+        "meta": {
+            "frame_width": int(w0), "frame_height": int(h0),
+            "samples_per_edge": int(max(8, args.samples_per_edge))
+        }
+    }
+    print(json.dumps(out, ensure_ascii=False))
+
+    # --- Save/Show ---
+    if args.out_img:
+        out_path = Path(args.out_img).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        ok = cv2.imwrite(str(out_path), frame)
+        if not ok:
+            print(f"[WARN] cannot save image to {out_path}", file=sys.stderr)
+
+    if args.show:
+        cv2.imshow("Curved zones on distorted image (single frame)", frame)
+        cv2.waitKey(1500)
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

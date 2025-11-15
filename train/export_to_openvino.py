@@ -2,7 +2,7 @@ from ultralytics import YOLO
 from pathlib import Path
 
 # путь к твоему чекпоинту
-pt_path = Path("./runs/train_yolov120/weights/best.pt")
+pt_path = Path("./runs/cars_ft_s0/weights/best.pt")
 
 # где сохранить (опционально)
 out_dir = pt_path.parent

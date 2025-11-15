@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """Usage:
+https://spb.rtsp.me/Iql1YgPLX1uXl9IsoJDEfQ/1762162620/hls/BnddY2Qe.m3u8?ip=77.234.210.201
 
 python detect_mjpeg_openvino.py \
-  --model /opt/yoloapp/models/best_openvino_model/model.xml \
-  --source http://109.236.111.203/mjpg/video.mjpg \
-  --imgsz 640 \
-  --conf 0.15 \
-  --iou 0.5 \
-  --car_only \
+  --model /opt/yoloapp/models/best_openvino_model/model.xml
+  --source http://109.236.111.203/mjpg/video.mjpg
+  --imgsz 640
+  --conf 0.15
+  --iou 0.5
+  --car_only
   --show
 """
 

@@ -1,3 +1,17 @@
+"""
+python train_yolo.py
+  --data "./merged_dataset/data.yaml"
+  --model-size s
+  --epochs 100
+  --imgsz 640
+  --batch 8
+  --device mps
+  --workers 4
+  --project runs
+  --name cars_ft_s
+
+"""
+
 import argparse
 import sys
 import zipfile
@@ -159,11 +173,7 @@ def main():
         if args.model:
             model = YOLO(args.model)  # тут может быть runs/.../last.pt или yolo12s.pt
         else:
-            if args.from_scratch:
-                model_id = f"yolo12{size}.yaml"   # конфиг
-            else:
-                model_id = f"yolo12{size}.pt"     # предобученные веса (рекомендуется)
-
+            model_id = f"yolo12{size}.pt" if not args.from_scratch else f"yolo12{size}.yaml"
             print(f"\n[INFO] Загружаю модель: {model_id}")
             model = YOLO(model_id)
 
@@ -174,13 +184,20 @@ def main():
                 imgsz=args.imgsz,
                 batch=args.batch,
                 workers=args.workers,
-                deterministic=False,
-                device=args.device if args.device is not None else None,
+                device=args.device or None,
                 project=args.project,
                 name=args.name,
                 patience=args.patience,
-                cache="disk"
+                cache="disk",
+                deterministic=False,
+                # single_cls НЕ ставим — при nc=1 это не требуется
             )
+
+            print("\n[INFO] Валидация на val...")
+            model.val(data=str(data_yaml), device=args.device or None)
+            if stats["test"][0]:
+                print("[INFO] Оценка на test...")
+                model.val(data=str(data_yaml), split="test", device=args.device or None)
 
         print(f"[INFO] Старт обучения на {args.epochs} эпох, imgsz={args.imgsz}, batch={args.batch}")
         results = model.train(
