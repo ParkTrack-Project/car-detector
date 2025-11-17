@@ -1,0 +1,5 @@
+numpy>=1.26.4
+opencv-python>=4.10.0.84
+openvino>=2025.3.0
+PyYAML>=6.0.3
+requests>=2.31
