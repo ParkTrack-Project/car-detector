@@ -33,6 +33,8 @@ jobs:
           rsync -az --delete \
             -e "ssh" \
             --exclude '.git' \
+            --exclude '__pycache__/' \
+            --exclude '**/__pycache__/' \
             . \
             "${{ secrets.USERNAME }}@${{ secrets.SERVER_IP }}:${{ secrets.PROJECT_PATH }}/"
 
