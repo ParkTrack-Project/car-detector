@@ -83,6 +83,11 @@ def fetch_camera_and_calibration(
     video_source_url = camera_info["source"]
     calibration_raw = camera_info["calib"]
 
+    crop_x = calibration_raw.get("crop_x")
+    crop_y = calibration_raw.get("crop_y")
+    crop_width = calibration_raw.get("crop_width")
+    crop_height = calibration_raw.get("crop_height")
+
     (
         calibration_image_width,
         calibration_image_height,
@@ -100,6 +105,10 @@ def fetch_camera_and_calibration(
         camera_matrix,
         distortion_coefficients,
         rectified_camera_matrix_opt,
+        crop_x,
+        crop_y,
+        crop_width,
+        crop_height,
     )
 
 
@@ -493,6 +502,89 @@ def compute_zone_confidences(zone_statistics: List[Dict[str, Any]]) -> None:
             weighted_scores_sum += car_info["score"] * car_info["overlap_ratio"]
         zone_info["confidence"] = float(weighted_scores_sum / len(cars_in_zone))
 
+def aggregate_detections_across_frames(
+    list_of_boxes: List[np.ndarray],
+    list_of_scores: List[np.ndarray],
+    list_of_class_ids: List[np.ndarray],
+    iou_threshold: float = 0.5,
+    min_appearances: int = 2,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Оставляет только те боксы, которые встретились не меньше min_appearances раз
+    на разных кадрах. Координаты и score усредняются.
+    """
+    clusters: List[Dict[str, Any]] = []
+
+    def iou(box_a, box_b) -> float:
+        xa1, ya1, xa2, ya2 = box_a
+        xb1, yb1, xb2, yb2 = box_b
+
+        inter_x1 = max(xa1, xb1)
+        inter_y1 = max(ya1, yb1)
+        inter_x2 = min(xa2, xb2)
+        inter_y2 = min(ya2, yb2)
+
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
+
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        area_a = (xa2 - xa1) * (ya2 - ya1)
+        area_b = (xb2 - xb1) * (yb2 - yb1)
+        union = area_a + area_b - inter_area
+        if union <= 0.0:
+            return 0.0
+        return inter_area / union
+
+    for boxes, scores, class_ids in zip(list_of_boxes, list_of_scores, list_of_class_ids):
+        for box, score, cls_id in zip(boxes, scores, class_ids):
+            best_cluster = None
+            best_iou = 0.0
+            for cluster in clusters:
+                if cluster["class_id"] != int(cls_id):
+                    continue
+                cluster_box = cluster["mean_box"]
+                current_iou = iou(cluster_box, box)
+                if current_iou > best_iou:
+                    best_iou = current_iou
+                    best_cluster = cluster
+
+            if best_cluster is None or best_iou < iou_threshold:
+                clusters.append(
+                    {
+                        "class_id": int(cls_id),
+                        "boxes": [box.astype(float)],
+                        "scores": [float(score)],
+                        "mean_box": box.astype(float),
+                    }
+                )
+            else:
+                best_cluster["boxes"].append(box.astype(float))
+                best_cluster["scores"].append(float(score))
+                best_cluster["mean_box"] = np.mean(best_cluster["boxes"], axis=0)
+
+    aggregated_boxes = []
+    aggregated_scores = []
+    aggregated_class_ids = []
+
+    for cluster in clusters:
+        if len(cluster["boxes"]) >= min_appearances:
+            aggregated_boxes.append(cluster["mean_box"])
+            aggregated_scores.append(np.mean(cluster["scores"]))
+            aggregated_class_ids.append(cluster["class_id"])
+
+    if not aggregated_boxes:
+        return (
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int32),
+        )
+
+    return (
+        np.stack(aggregated_boxes).astype(np.float32),
+        np.array(aggregated_scores, dtype=np.float32),
+        np.array(aggregated_class_ids, dtype=np.int32),
+    )
+
 
 def render_visualization_frame(
     base_frame_bgr: np.ndarray,
@@ -687,11 +779,55 @@ def run_single_frame_pipeline(args):
         camera_matrix,
         distortion_coefficients,
         rectified_camera_matrix_opt,
+        crop_x,
+        crop_y,
+        crop_width,
+        crop_height,
     ) = fetch_camera_and_calibration(http_session, base_api_url)
 
-    # 3. Первый кадр
-    first_frame_bgr = grab_first_frame(video_source_url)
+    # 3. Три кадра с интервалом примерно 2 секунды из одного потока
+    video_capture = cv2.VideoCapture(video_source_url, cv2.CAP_FFMPEG)
+    if not video_capture.isOpened():
+        raise RuntimeError(f"cannot open source: {video_source_url}")
+
+    frames_bgr = []
+    targets = [0.0, 5.0, 10.0]  # целевые моменты (секунды) относительно старта
+    start_time = time.time()
+    current_target_idx = 0
+
+    while current_target_idx < len(targets):
+        ok, frame = video_capture.read()
+        if not ok or frame is None:
+            raise RuntimeError("cannot read frame from source")
+
+        now = time.time()
+        elapsed = now - start_time
+
+        # как только прошли нужные секунды — фиксируем кадр
+        if elapsed >= targets[current_target_idx]:
+            frames_bgr.append(frame.copy())
+            current_target_idx += 1
+
+    video_capture.release()
+
+    first_frame_bgr = frames_bgr[0]
     frame_height, frame_width = first_frame_bgr.shape[:2]
+
+    # 3a. Обрезка кадров по параметрам из calib (если они заданы)
+    use_crop = (
+            crop_x is not None
+            and crop_y is not None
+            and crop_width is not None
+            and crop_height is not None
+    )
+
+    if use_crop:
+        detection_frames_bgr = [
+            frame[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width].copy()
+            for frame in frames_bgr
+        ]
+    else:
+        detection_frames_bgr = frames_bgr
 
     # 4. Подгонка матрицы камеры
     camera_matrix = adjust_camera_matrix_to_frame_size(
@@ -725,34 +861,99 @@ def run_single_frame_pipeline(args):
     )
     zone_colors_bgr = vivid_palette(len(curved_zone_polygons))
 
-    # 7. Инференс
+    # 7. Инференс на трёх кадрах
     model_xml_path = Path(args.model).expanduser().resolve()
+
+    all_boxes_full: List[np.ndarray] = []
+    all_scores: List[np.ndarray] = []
+    all_class_ids: List[np.ndarray] = []
+    class_names = None
+
+    for det_frame_bgr in detection_frames_bgr:
+        (
+            boxes,
+            scores,
+            class_ids,
+            class_names_local,
+            resize_ratio,
+            padding_width,
+            padding_height,
+        ) = run_openvino_inference_on_frame(
+            det_frame_bgr,
+            model_xml_path=model_xml_path,
+            device=args.device,
+            img_size=args.imgsz,
+            confidence_threshold=args.conf,
+            car_only=args.car_only,
+        )
+
+        det_h, det_w = det_frame_bgr.shape[:2]
+        boxes = restore_boxes_to_original_frame(
+            boxes,
+            resize_ratio=resize_ratio,
+            padding_width=padding_width,
+            padding_height=padding_height,
+            frame_width=det_w,
+            frame_height=det_h,
+        )
+
+        # Если кадр был обрезан по ROI, возвращаемся в координаты полного кадра
+        if use_crop:
+            boxes[:, [0, 2]] += crop_x
+            boxes[:, [1, 3]] += crop_y
+
+        all_boxes_full.append(boxes)
+        all_scores.append(scores)
+        all_class_ids.append(class_ids)
+
+        if class_names is None:
+            class_names = class_names_local
+
+    # 7b. Агрегация: берём боксы, которые попали на 2 или 3 кадра
     (
         bounding_boxes_xyxy,
         detection_scores,
         detection_class_ids,
-        class_names,
-        resize_ratio,
-        padding_width,
-        padding_height,
-    ) = run_openvino_inference_on_frame(
-        first_frame_bgr,
-        model_xml_path=model_xml_path,
-        device=args.device,
-        img_size=args.imgsz,
-        confidence_threshold=args.conf,
-        car_only=args.car_only,
+    ) = aggregate_detections_across_frames(
+        all_boxes_full,
+        all_scores,
+        all_class_ids,
+        iou_threshold=0.5,
+        min_appearances=2,
     )
 
-    # 8. Перенос боксов в координаты оригинального кадра
-    bounding_boxes_xyxy = restore_boxes_to_original_frame(
-        bounding_boxes_xyxy,
-        resize_ratio=resize_ratio,
-        padding_width=padding_width,
-        padding_height=padding_height,
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
+    # 8. Отладочные кадры до агрегации
+    if args.debug and args.out_img:
+        base_out_path = Path(args.out_img)
+        stem = base_out_path.stem
+        suffix = base_out_path.suffix or ".jpg"
+
+        for idx, (frame_bgr, boxes, scores, class_ids) in enumerate(
+                zip(frames_bgr, all_boxes_full, all_scores, all_class_ids),
+                start=1,
+        ):
+            debug_frame = frame_bgr.copy()
+            for box, score, cls_id in zip(boxes, scores, class_ids):
+                if 0 <= int(cls_id) < len(class_names):
+                    cls_name = class_names[int(cls_id)]
+                else:
+                    cls_name = str(int(cls_id))
+                score_percent = int(round(float(score) * 100))
+                label = f"{cls_name} {score_percent}%"
+
+                draw_box_with_alpha(
+                    debug_frame,
+                    box,
+                    label,
+                    edge_color_bgr=(0, 255, 0),
+                    fill_color_bgr=None,
+                    alpha=0.0,
+                    thickness=2,
+                )
+
+            debug_path = base_out_path.with_name(f"{stem}_debug{idx}{suffix}")
+            print(str(debug_path))
+            cv2.imwrite(str(debug_path), debug_frame)
 
     # 9. Назначение машин зонам
     zone_statistics, car_assigned_zone_indices = assign_detections_to_zones(

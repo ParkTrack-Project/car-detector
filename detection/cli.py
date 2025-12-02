@@ -70,6 +70,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Путь для сохранения визуализированного кадра (если пусто — не сохраняем)"
     )
     argument_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Сохранять три промежуточных кадра детекции (до агрегации)"
+    )
+
+    argument_parser.add_argument(
         "--show",
         action="store_true",
         help="Показать окно с визуализацией кадра"
