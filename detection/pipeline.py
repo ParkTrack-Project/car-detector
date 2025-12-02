@@ -785,6 +785,10 @@ def run_single_frame_pipeline(args):
         crop_height,
     ) = fetch_camera_and_calibration(http_session, base_api_url)
 
+    # Подготовка путей сохранения (папка берётся из --out_img)
+    out_dir = None
+    final_img_path = None
+
     # 3. Три кадра с интервалом примерно 2 секунды из одного потока
     video_capture = cv2.VideoCapture(video_source_url, cv2.CAP_FFMPEG)
     if not video_capture.isOpened():
@@ -923,11 +927,7 @@ def run_single_frame_pipeline(args):
     )
 
     # 8. Отладочные кадры до агрегации
-    if args.debug and args.out_img:
-        base_out_path = Path(args.out_img)
-        stem = base_out_path.stem
-        suffix = base_out_path.suffix or ".jpg"
-
+    if args.debug and out_dir is not None:
         for idx, (frame_bgr, boxes, scores, class_ids) in enumerate(
                 zip(frames_bgr, all_boxes_full, all_scores, all_class_ids),
                 start=1,
@@ -951,8 +951,7 @@ def run_single_frame_pipeline(args):
                     thickness=2,
                 )
 
-            debug_path = base_out_path.with_name(f"{stem}_debug{idx}{suffix}")
-            print(str(debug_path))
+            debug_path = out_dir / f"{camera_id}_debug{idx}.jpg"
             cv2.imwrite(str(debug_path), debug_frame)
 
     # 9. Назначение машин зонам

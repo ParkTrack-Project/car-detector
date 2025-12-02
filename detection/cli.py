@@ -67,7 +67,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     argument_parser.add_argument(
         "--out_img",
         default="",
-        help="Путь для сохранения визуализированного кадра (если пусто — не сохраняем)"
+        help="Путь к папке для сохранения изображений (итог + debug)"
     )
     argument_parser.add_argument(
         "--debug",

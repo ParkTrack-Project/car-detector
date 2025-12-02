@@ -27,8 +27,18 @@ def main():
 
     # Сохранение изображения (если указано)
     if args.out_img:
-        output_image_path = Path(args.out_img).expanduser().resolve()
-        output_image_path.parent.mkdir(parents=True, exist_ok=True)
+        # Берём camera_id из результата пайплайна
+        camera_id = result_payload.get("camera_id")
+
+        out_dir = Path(args.out_img).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if camera_id is None:
+            # Фолбэк, если вдруг camera_id нет (на всякий случай)
+            output_image_path = out_dir / "result.jpg"
+        else:
+            output_image_path = out_dir / f"{camera_id}.jpg"
+
         success_write = cv2.imwrite(str(output_image_path), visualization_frame_bgr)
         if not success_write:
             print(
