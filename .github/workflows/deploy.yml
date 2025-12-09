@@ -38,7 +38,7 @@ jobs:
             . \
             "${{ secrets.USERNAME }}@${{ secrets.SERVER_IP }}:${{ secrets.PROJECT_PATH }}/"
 
-      - name: Install dependencies via SSH
+      - name: Install dependencies via SSH and restart service
         run: |
           ssh "${{ secrets.USERNAME }}@${{ secrets.SERVER_IP }}" "
             cd '${{ secrets.PROJECT_PATH }}' && \
