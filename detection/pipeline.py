@@ -795,7 +795,7 @@ def run_single_frame_pipeline(args):
         raise RuntimeError(f"cannot open source: {video_source_url}")
 
     frames_bgr = []
-    targets = [0.0, 5.0, 10.0]  # целевые моменты (секунды) относительно старта
+    targets = [0.0, 10.0, 20.0]  # целевые моменты (секунды) относительно старта
     start_time = time.time()
     current_target_idx = 0
 
