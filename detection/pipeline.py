@@ -40,6 +40,98 @@ from api_client import (
 
 # ---------- Вспомогательные шаги пайплайна ----------
 
+import time
+import cv2
+import numpy as np
+import requests
+
+
+def fetch_image_bgr(url: str, timeout: float = 10.0, headers: dict | None = None) -> np.ndarray:
+    h = headers or {}
+    with requests.get(url, headers=h, timeout=timeout) as r:
+        r.raise_for_status()
+        data = r.content
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        ct = (r.headers.get("Content-Type") or "").lower()
+        raise RuntimeError(f"cannot decode image from {url} (Content-Type={ct}, bytes={len(data)})")
+    return img
+
+
+def probe_content_type(url: str, timeout: float = 5.0, headers: dict | None = None) -> str:
+    h = dict(headers or {})
+    h.setdefault("Range", "bytes=0-2047")
+    with requests.get(url, headers=h, timeout=timeout, stream=True) as r:
+        # не читаем тело, нам важен только Content-Type
+        return (r.headers.get("Content-Type") or "").lower()
+
+
+def grab_frames_video_opencv(url: str, targets: list[float], timeout_open_sec: float = 5.0) -> list[np.ndarray]:
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open source: {url}")
+
+    frames: list[np.ndarray] = []
+    start = time.time()
+    idx = 0
+    deadline = start + max(targets) + max(5.0, timeout_open_sec)
+
+    # дадим немного времени на появление первых кадров
+    while time.time() < deadline and idx < len(targets):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            time.sleep(0.02)
+            continue
+
+        elapsed = time.time() - start
+        if elapsed >= targets[idx]:
+            frames.append(frame.copy())
+            idx += 1
+
+    cap.release()
+
+    if len(frames) < len(targets):
+        raise RuntimeError(f"cannot read enough frames from video: got {len(frames)}/{len(targets)}")
+    return frames
+
+
+def grab_frames_any(url: str, targets: list[float], headers: dict | None = None) -> list[np.ndarray]:
+    """
+    Если это image/*: делаем N запросов с паузой (targets как расписание).
+    Если это видео: читаем из OpenCV-VideoCapture.
+    """
+    ctype = ""
+    try:
+        ctype = probe_content_type(url, headers=headers)
+    except requests.RequestException:
+        # если проба не удалась — попробуем как видео
+        ctype = ""
+
+    if ctype.startswith("image/"):
+        frames: list[np.ndarray] = []
+        t0 = time.time()
+        for t in targets:
+            wait = (t0 + t) - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            frames.append(fetch_image_bgr(url, headers=headers))
+        return frames
+
+    # иначе пытаемся видео
+    try:
+        return grab_frames_video_opencv(url, targets)
+    except Exception:
+        # последний шанс: вдруг это всё-таки картинка (без корректного Content-Type)
+        frames: list[np.ndarray] = []
+        t0 = time.time()
+        for t in targets:
+            wait = (t0 + t) - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            frames.append(fetch_image_bgr(url, headers=headers))
+        return frames
+
+
 def setup_http_session(api_token: str) -> requests.Session:
     """
     Создаёт HTTP-сессию с нужным заголовком Authorization.
@@ -790,30 +882,8 @@ def run_single_frame_pipeline(args):
     final_img_path = None
 
     # 3. Три кадра с интервалом примерно 2 секунды из одного потока
-    video_capture = cv2.VideoCapture(video_source_url, cv2.CAP_FFMPEG)
-    if not video_capture.isOpened():
-        raise RuntimeError(f"cannot open source: {video_source_url}")
-
-    frames_bgr = []
-    targets = [0.0, 10.0, 20.0]  # целевые моменты (секунды) относительно старта
-    start_time = time.time()
-    current_target_idx = 0
-
-    while current_target_idx < len(targets):
-        ok, frame = video_capture.read()
-        if not ok or frame is None:
-            raise RuntimeError("cannot read frame from source")
-
-        now = time.time()
-        elapsed = now - start_time
-
-        # как только прошли нужные секунды — фиксируем кадр
-        if elapsed >= targets[current_target_idx]:
-            frames_bgr.append(frame.copy())
-            current_target_idx += 1
-
-    video_capture.release()
-
+    targets = [0.0, 10.0, 20.0]
+    frames_bgr = grab_frames_any(video_source_url, targets, headers=None)
     first_frame_bgr = frames_bgr[0]
     frame_height, frame_width = first_frame_bgr.shape[:2]
 
