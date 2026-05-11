@@ -1,4 +1,6 @@
 import sys
+from typing import Optional
+
 import requests
 
 
@@ -70,6 +72,53 @@ def update_zone_occupancy(
     if not (200 <= response.status_code < 300):
         print(
             f"[WARN] zone {zone_id} update failed: "
+            f"{response.status_code} {response.text}",
+            file=sys.stderr
+        )
+
+
+def create_occupancy_observation(
+    http_session: requests.Session,
+    base_api_url: str,
+    zone_id: int,
+    occupied_count: int,
+    zone_confidence: float,
+    observed_at_iso: str,
+    source_type: str = "camera_cv",
+    source_ref: Optional[str] = None,
+    capacity: Optional[int] = None,
+    timeout_seconds: float = 5.0,
+):
+    """
+    Создаёт запись наблюдения занятости через API:
+        POST {BASE_API_URL}/occupancy/new
+
+    Тело запроса соответствует OccupancyCreateRequest:
+        required: zone_id, source_type, observed_at, occupied, confidence
+        optional: source_ref, capacity
+    """
+    request_url = base_api_url.rstrip("/") + "/occupancy/new"
+    request_payload = {
+        "zone_id": int(zone_id),
+        "source_type": source_type,
+        "observed_at": observed_at_iso,
+        "occupied": int(occupied_count),
+        "confidence": float(zone_confidence),
+    }
+    if source_ref is not None:
+        request_payload["source_ref"] = source_ref
+    if capacity is not None:
+        request_payload["capacity"] = int(capacity)
+
+    response = http_session.post(
+        request_url,
+        json=request_payload,
+        timeout=timeout_seconds
+    )
+
+    if not (200 <= response.status_code < 300):
+        print(
+            f"[WARN] occupancy create failed for zone {zone_id}: "
             f"{response.status_code} {response.text}",
             file=sys.stderr
         )

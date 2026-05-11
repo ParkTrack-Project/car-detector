@@ -35,6 +35,7 @@ from api_client import (
     fetch_next_camera,
     fetch_zones_for_camera,
     update_zone_occupancy,
+    create_occupancy_observation,
 )
 
 
@@ -317,13 +318,15 @@ def build_curved_zones_from_api(
     zone_identifiers = []
 
     for zone_description in zones_from_api:
-        zone_points = zone_description.get("points") or []
-        if len(zone_points) < 3:
+        # По спеке ParkTrack OpenAPI зона несёт image_polygon: массив из 4 точек,
+        # где каждая точка — это [x, y] (массив двух integer, не объект).
+        zone_image_polygon = zone_description.get("image_polygon") or []
+        if len(zone_image_polygon) < 3:
             # игнорируем некорректные зоны из API
             continue
 
         distorted_anchors_pixels = np.array(
-            [[point["x"], point["y"]] for point in zone_points],
+            [[float(point[0]), float(point[1])] for point in zone_image_polygon],
             dtype=np.float64
         )
 
@@ -788,6 +791,7 @@ def build_result_payload(
     base_api_url: str,
     zone_statistics: List[Dict[str, Any]],
     bounding_boxes_xyxy: np.ndarray,
+    observed_at_iso: str,
 ) -> Dict[str, Any]:
     """
     Собирает JSON-пейлоад результата, аналогичный тому, что раньше печатался в main.
@@ -796,7 +800,7 @@ def build_result_payload(
         dict: Готовый JSON-словарь результата.
     """
     result_payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": observed_at_iso,
         "camera_id": camera_id,
         "source": str(video_source_url),
         "zones": zone_statistics,
@@ -818,27 +822,51 @@ def push_zone_updates_to_api(
     http_session: requests.Session,
     base_api_url: str,
     zone_statistics: List[Dict[str, Any]],
+    observed_at_iso: str,
 ) -> None:
     """
-    Проходит по всем зонам и отправляет их занятость и confidence в API.
+    Проходит по всем зонам и публикует результаты детекции в API двумя способами:
+      1) POST /occupancy/new — наблюдение от источника camera_cv (история).
+      2) PUT  /zones/{zone_id} — обновление текущей занятости зоны.
 
     Аргументы:
         http_session (requests.Session): HTTP-сессия.
-        base_api_url (str): Базовый URL API.
+        base_api_url (str): Базовый URL API (включая /api/v1).
         zone_statistics (list[dict]): Статистика по зонам.
+        observed_at_iso (str): Метка времени наблюдения в ISO-8601 (UTC).
     """
     for zone_info in zone_statistics:
+        zone_id = int(zone_info["id"])
+        occupied_count = int(zone_info["occupied"])
+        zone_confidence = float(zone_info["confidence"])
+
+        try:
+            create_occupancy_observation(
+                http_session,
+                base_api_url,
+                zone_id=zone_id,
+                occupied_count=occupied_count,
+                zone_confidence=zone_confidence,
+                observed_at_iso=observed_at_iso,
+                source_type="camera_cv",
+            )
+        except Exception as exception:
+            print(
+                f"[WARN] failed to create occupancy for zone {zone_id}: {exception}",
+                file=sys.stderr
+            )
+
         try:
             update_zone_occupancy(
                 http_session,
                 base_api_url,
-                zone_id=zone_info["id"],
-                occupied_count=zone_info["occupied"],
-                zone_confidence=zone_info["confidence"],
+                zone_id=zone_id,
+                occupied_count=occupied_count,
+                zone_confidence=zone_confidence,
             )
         except Exception as exception:
             print(
-                f"[WARN] failed to update zone {zone_info['id']}: {exception}",
+                f"[WARN] failed to update zone {zone_id}: {exception}",
                 file=sys.stderr
             )
 
@@ -1054,6 +1082,7 @@ def run_single_frame_pipeline(args):
     )
 
     # 12. JSON-результат
+    observed_at_iso = datetime.now(timezone.utc).isoformat()
     result_payload = build_result_payload(
         camera_id,
         video_source_url,
@@ -1063,9 +1092,15 @@ def run_single_frame_pipeline(args):
         base_api_url=base_api_url,
         zone_statistics=zone_statistics,
         bounding_boxes_xyxy=bounding_boxes_xyxy,
+        observed_at_iso=observed_at_iso,
     )
 
-    # 13. Отправка в API
-    push_zone_updates_to_api(http_session, base_api_url, zone_statistics)
+    # 13. Отправка в API: наблюдение в /occupancy/new + апдейт зоны в /zones/{id}
+    push_zone_updates_to_api(
+        http_session,
+        base_api_url,
+        zone_statistics,
+        observed_at_iso=observed_at_iso,
+    )
 
     return result_payload, visualization_frame_bgr
