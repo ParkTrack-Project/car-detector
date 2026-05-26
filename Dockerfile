@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY detection/ ./detection/
 COPY run_loop.sh .
-RUN sed -i 's/\r$//' run_loop.sh && chmod +x run_loop.sh
 
 ENV PYTHONPATH="/app/detection:${PYTHONPATH}"
 
