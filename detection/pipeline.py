@@ -743,11 +743,11 @@ def render_visualization_frame(
             draw_box_with_alpha(
                 visualization_frame_bgr,
                 bounding_box_xyxy,
-                detection_label_text,
+                "",
                 edge_color_bgr=box_edge_color_bgr,
                 fill_color_bgr=box_fill_color_bgr,
                 alpha=car_alpha,
-                thickness=2
+                thickness=1
             )
         else:
             draw_box_with_alpha(
