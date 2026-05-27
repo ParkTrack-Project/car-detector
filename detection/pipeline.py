@@ -856,6 +856,8 @@ def push_zone_updates_to_api(
         capacity = None
         if isinstance(updated_zone, dict) and updated_zone.get("capacity") is not None:
             capacity = int(updated_zone["capacity"])
+        elif zone_info.get("capacity") is not None:
+            capacity = int(zone_info["capacity"])
 
         try:
             create_occupancy_observation(
