@@ -1,5 +1,5 @@
 import sys
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -52,10 +52,14 @@ def update_zone_occupancy(
     occupied_count: int,
     zone_confidence: float,
     timeout_seconds: float = 5.0
-):
+) -> Dict[str, Any]:
     """
-    Обновляет информацию о занятости конкретной зоны через API:
+    Обновляет текущую занятость конкретной зоны через API:
         PUT {BASE_API_URL}/zones/<zone_id>
+
+    Возвращает обновлённый объект Zone из ответа сервера.
+    Если сервер вернул ошибку, пробрасывает исключение requests.HTTPError,
+    чтобы вызывающий код мог не создавать неконсистентную запись истории.
     """
     request_url = base_api_url.rstrip("/") + f"/zones/{zone_id}"
     request_payload = {
@@ -75,6 +79,9 @@ def update_zone_occupancy(
             f"{response.status_code} {response.text}",
             file=sys.stderr
         )
+        response.raise_for_status()
+
+    return response.json()
 
 
 def create_occupancy_observation(
@@ -87,15 +94,16 @@ def create_occupancy_observation(
     source_type: str = "camera_cv",
     source_ref: Optional[str] = None,
     capacity: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
     timeout_seconds: float = 5.0,
-):
+) -> Dict[str, Any]:
     """
     Создаёт запись наблюдения занятости через API:
         POST {BASE_API_URL}/occupancy/new
 
     Тело запроса соответствует OccupancyCreateRequest:
         required: zone_id, source_type, observed_at, occupied, confidence
-        optional: source_ref, capacity
+        optional: source_ref, capacity, metadata
     """
     request_url = base_api_url.rstrip("/") + "/occupancy/new"
     request_payload = {
@@ -109,6 +117,8 @@ def create_occupancy_observation(
         request_payload["source_ref"] = source_ref
     if capacity is not None:
         request_payload["capacity"] = int(capacity)
+    if metadata is not None:
+        request_payload["metadata"] = metadata
 
     response = http_session.post(
         request_url,
@@ -122,3 +132,6 @@ def create_occupancy_observation(
             f"{response.status_code} {response.text}",
             file=sys.stderr
         )
+        response.raise_for_status()
+
+    return response.json()

@@ -825,20 +825,37 @@ def push_zone_updates_to_api(
     observed_at_iso: str,
 ) -> None:
     """
-    Проходит по всем зонам и публикует результаты детекции в API двумя способами:
-      1) POST /occupancy/new — наблюдение от источника camera_cv (история).
-      2) PUT  /zones/{zone_id} — обновление текущей занятости зоны.
+    Проходит по всем зонам и публикует результаты детекции в API двумя шагами:
+      1) PUT  /zones/{zone_id} — обновляет текущее состояние зоны.
+      2) POST /occupancy/new — пишет это же состояние в историю occupancy.
 
-    Аргументы:
-        http_session (requests.Session): HTTP-сессия.
-        base_api_url (str): Базовый URL API (включая /api/v1).
-        zone_statistics (list[dict]): Статистика по зонам.
-        observed_at_iso (str): Метка времени наблюдения в ISO-8601 (UTC).
+    Важно: запись истории создаётся только после успешного PUT, чтобы не получить
+    ситуацию, когда в истории есть наблюдение, а текущая зона не обновилась.
     """
     for zone_info in zone_statistics:
         zone_id = int(zone_info["id"])
         occupied_count = int(zone_info["occupied"])
         zone_confidence = float(zone_info["confidence"])
+
+        try:
+            updated_zone = update_zone_occupancy(
+                http_session,
+                base_api_url,
+                zone_id=zone_id,
+                occupied_count=occupied_count,
+                zone_confidence=zone_confidence,
+            )
+        except Exception as exception:
+            print(
+                f"[WARN] failed to update zone {zone_id}; "
+                f"occupancy history row will not be created: {exception}",
+                file=sys.stderr
+            )
+            continue
+
+        capacity = None
+        if isinstance(updated_zone, dict) and updated_zone.get("capacity") is not None:
+            capacity = int(updated_zone["capacity"])
 
         try:
             create_occupancy_observation(
@@ -849,24 +866,17 @@ def push_zone_updates_to_api(
                 zone_confidence=zone_confidence,
                 observed_at_iso=observed_at_iso,
                 source_type="camera_cv",
+                source_ref=f"zone:{zone_id}:detected_at:{observed_at_iso}",
+                capacity=capacity,
+                metadata={
+                    "writer": "detection_pipeline",
+                    "action": "zone_occupancy_update",
+                },
             )
         except Exception as exception:
             print(
-                f"[WARN] failed to create occupancy for zone {zone_id}: {exception}",
-                file=sys.stderr
-            )
-
-        try:
-            update_zone_occupancy(
-                http_session,
-                base_api_url,
-                zone_id=zone_id,
-                occupied_count=occupied_count,
-                zone_confidence=zone_confidence,
-            )
-        except Exception as exception:
-            print(
-                f"[WARN] failed to update zone {zone_id}: {exception}",
+                f"[WARN] zone {zone_id} was updated, "
+                f"but failed to create occupancy history row: {exception}",
                 file=sys.stderr
             )
 
@@ -1082,7 +1092,7 @@ def run_single_frame_pipeline(args):
     )
 
     # 12. JSON-результат
-    observed_at_iso = datetime.now(timezone.utc).isoformat()
+    observed_at_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     result_payload = build_result_payload(
         camera_id,
         video_source_url,
