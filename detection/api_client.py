@@ -120,6 +120,8 @@ def create_occupancy_observation(
     if metadata is not None:
         request_payload["metadata"] = metadata
 
+    print("Payload:", request_payload)
+
     response = http_session.post(
         request_url,
         json=request_payload,
