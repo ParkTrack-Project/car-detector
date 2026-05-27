@@ -39,7 +39,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--conf",
         type=float,
         default=0.15,
-        help="Порог уверенности детектирования объектов"
+        help=(
+            "Порог уверенности детектирования объектов. "
+            "Используется как fallback, если у камеры в calib не задано "
+            "поле confidence (calib.confidence имеет приоритет)."
+        )
     )
     argument_parser.add_argument(
         "--car_only",
