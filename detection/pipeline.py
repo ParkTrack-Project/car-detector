@@ -168,7 +168,11 @@ def fetch_camera_and_calibration(
             frame_height_from_calib (int),
             camera_matrix (np.ndarray),
             distortion_coefficients (np.ndarray),
-            rectified_camera_matrix (np.ndarray | None)
+            rectified_camera_matrix (np.ndarray | None),
+            crop_x, crop_y, crop_width, crop_height,
+            confidence_threshold (float | None): если задано в calib.confidence
+                — используется как порог детекции для этой камеры; иначе None
+                и вызывающая сторона должна подставить дефолт из аргументов CLI.
     """
     camera_info = fetch_next_camera(http_session, base_api_url)
 
@@ -180,6 +184,19 @@ def fetch_camera_and_calibration(
     crop_y = calibration_raw.get("crop_y")
     crop_width = calibration_raw.get("crop_width")
     crop_height = calibration_raw.get("crop_height")
+
+    # Per-camera порог уверенности из calib. Допустимы ключи: confidence,
+    # conf_threshold, confidence_threshold — кладёт админка, поле опционально.
+    confidence_threshold = None
+    for key in ("confidence", "conf_threshold", "confidence_threshold"):
+        raw_value = calibration_raw.get(key)
+        if raw_value is None:
+            continue
+        try:
+            confidence_threshold = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        break
 
     (
         calibration_image_width,
@@ -202,6 +219,7 @@ def fetch_camera_and_calibration(
         crop_y,
         crop_width,
         crop_height,
+        confidence_threshold,
     )
 
 
@@ -913,7 +931,20 @@ def run_single_frame_pipeline(args):
         crop_y,
         crop_width,
         crop_height,
+        camera_confidence_threshold,
     ) = fetch_camera_and_calibration(http_session, base_api_url)
+
+    # Порог уверенности: из calib камеры если задан, иначе из CLI --conf.
+    effective_confidence_threshold = (
+        camera_confidence_threshold
+        if camera_confidence_threshold is not None
+        else args.conf
+    )
+    print(
+        f"[cam {camera_id}] confidence threshold = {effective_confidence_threshold} "
+        f"({'из calib' if camera_confidence_threshold is not None else 'из --conf'})",
+        flush=True,
+    )
 
     # Подготовка путей сохранения (папка берётся из --out_img)
     out_dir = None
@@ -995,7 +1026,7 @@ def run_single_frame_pipeline(args):
             model_xml_path=model_xml_path,
             device=args.device,
             img_size=args.imgsz,
-            confidence_threshold=args.conf,
+            confidence_threshold=effective_confidence_threshold,
             car_only=args.car_only,
         )
 
