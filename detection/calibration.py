@@ -3,34 +3,28 @@ import cv2
 
 
 def load_calibration_from_dict(calibration_data):
-    """
-    Загружает параметры калибровки камеры из словаря.
+    if not calibration_data:
+        return None
 
-    Ожидаемый формат calibration_data:
-        {
-          "image_width": int,
-          "image_height": int,
-          "K": [9 значений],
-          "D": [...],
-          "newK": [9 значений] (опционально),
-          "balance": float (опционально)
-        }
-    """
+    required_fields = ["image_width", "image_height", "K", "D"]
+
+    if any(field not in calibration_data for field in required_fields):
+        print(
+            "[WARN] incomplete calibration data, undistortion will be skipped. "
+            f"Received keys: {list(calibration_data.keys())}",
+            flush=True,
+        )
+        return None
+
     image_width = int(calibration_data["image_width"])
     image_height = int(calibration_data["image_height"])
 
     camera_matrix = np.array(calibration_data["K"], dtype=np.float64).reshape(3, 3)
-    distortion_coefficients = np.array(
-        calibration_data["D"],
-        dtype=np.float64
-    ).reshape(-1, 1)
+    distortion_coefficients = np.array(calibration_data["D"], dtype=np.float64).reshape(-1, 1)
 
     rectified_camera_matrix = None
-    if "newK" in calibration_data and calibration_data["newK"] is not None:
-        rectified_camera_matrix = np.array(
-            calibration_data["newK"],
-            dtype=np.float64
-        ).reshape(3, 3)
+    if calibration_data.get("newK") is not None:
+        rectified_camera_matrix = np.array(calibration_data["newK"], dtype=np.float64).reshape(3, 3)
 
     balance = float(calibration_data.get("balance", 0.0))
 
@@ -42,7 +36,6 @@ def load_calibration_from_dict(calibration_data):
         rectified_camera_matrix,
         balance,
     )
-
 
 def compute_fullview_rectified_camera_matrix(
     image_width,
