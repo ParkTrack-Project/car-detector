@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 import json
-
+import traceback
 import cv2
 
 from cli import parse_arguments
@@ -18,8 +18,8 @@ def main():
     try:
         result_payload, visualization_frame_bgr = run_single_frame_pipeline(args)
     except Exception as exception:
-        # Центральная точка обработки ошибок
-        print(f"[ERR] pipeline failed: {exception}", file=sys.stderr)
+        print(f"[ERR] pipeline failed: {type(exception).__name__}: {exception}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
     # Печатаем JSON в stdout
