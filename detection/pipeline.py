@@ -201,14 +201,24 @@ def fetch_camera_and_calibration(
             continue
         break
 
-    (
-        calibration_image_width,
-        calibration_image_height,
-        camera_matrix,
-        distortion_coefficients,
-        rectified_camera_matrix_opt,
-        _,
-    ) = load_calibration_from_dict(calibration_raw)
+    calibration_result = load_calibration_from_dict(calibration_raw)
+
+    if calibration_result is None:
+        calibration_image_width = None
+        calibration_image_height = None
+        camera_matrix = None
+        distortion_coefficients = None
+        rectified_camera_matrix_opt = None
+        balance = 0.0
+    else:
+        (
+            calibration_image_width,
+            calibration_image_height,
+            camera_matrix,
+            distortion_coefficients,
+            rectified_camera_matrix_opt,
+            balance,
+        ) = calibration_result
 
     return (
         camera_id,
@@ -938,6 +948,8 @@ def run_single_frame_pipeline(args):
         crop_height,
         camera_confidence_threshold,
     ) = fetch_camera_and_calibration(http_session, base_api_url)
+
+    print(f"Starting with camera {camera_id}")
 
     # Порог уверенности: из calib камеры если задан, иначе из CLI --conf.
     effective_confidence_threshold = (
