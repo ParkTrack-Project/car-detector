@@ -764,7 +764,7 @@ def render_visualization_frame(
             detection_class_name = str(int(detection_class_id))
 
         detection_score_percent = int(round(float(detection_score) * 100))
-        detection_label_text = f"{detection_class_name} {detection_score_percent}%"
+        detection_label_text = str(detection_score_percent)
 
         assigned_zone_index = car_assigned_zone_indices[detection_index]
 
@@ -774,7 +774,7 @@ def render_visualization_frame(
             draw_box_with_alpha(
                 visualization_frame_bgr,
                 bounding_box_xyxy,
-                "",
+                detection_label_text,
                 edge_color_bgr=box_edge_color_bgr,
                 fill_color_bgr=box_fill_color_bgr,
                 alpha=car_alpha,

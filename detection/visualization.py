@@ -172,9 +172,9 @@ def draw_box_with_alpha(
             label_text,
             text_position,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.4,
             (0, 0, 0),
-            3,
+            2,
             cv2.LINE_AA
         )
         # Цветной текст
@@ -183,7 +183,7 @@ def draw_box_with_alpha(
             label_text,
             text_position,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.4,
             edge_color_bgr,
             1,
             cv2.LINE_AA
