@@ -178,7 +178,10 @@ def fetch_camera_and_calibration(
 
     camera_id = int(camera_info["camera_id"])
     video_source_url = camera_info["source"]
-    calibration_raw = camera_info["calib"]
+    calibration_raw = camera_info.get("calibration") or {}
+
+    if not calibration_raw:
+        print("[WARN] camera calibration is missing, using full frame", flush=True)
 
     crop_x = calibration_raw.get("crop_x")
     crop_y = calibration_raw.get("crop_y")
