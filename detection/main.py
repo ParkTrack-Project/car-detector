@@ -16,7 +16,7 @@ def main():
     args = parse_arguments()
 
     try:
-        result_payload, visualization_frame_bgr = run_single_frame_pipeline(args)
+        result_payload, visualization_frame_bgr, source_frame = run_single_frame_pipeline(args)
     except Exception as exception:
         print(f"[ERR] pipeline failed: {type(exception).__name__}: {exception}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -35,14 +35,22 @@ def main():
 
         if camera_id is None:
             # Фолбэк, если вдруг camera_id нет (на всякий случай)
-            output_image_path = out_dir / "result.jpg"
+            annotated_output_image_path = out_dir / "annotated.jpg"
+            source_image_path = out_dir / "source.jpg"
         else:
-            output_image_path = out_dir / f"{camera_id}.jpg"
+            annotated_output_image_path = out_dir / f"{camera_id}.jpg"
+            source_image_path = out_dir / f"{camera_id}_source.jpg"
 
-        success_write = cv2.imwrite(str(output_image_path), visualization_frame_bgr)
-        if not success_write:
+        annotated_success_write = cv2.imwrite(str(annotated_output_image_path), visualization_frame_bgr)
+        if not annotated_success_write:
             print(
-                f"[WARN] cannot save image to {output_image_path}",
+                f"[WARN] cannot save annotated image to {annotated_output_image_path}",
+                file=sys.stderr
+            )
+        source_success_write = cv2.imwrite(str(source_image_path), source_frame)
+        if not source_success_write:
+            print(
+                f"[WARN] cannot save source image to {annotated_output_image_path}",
                 file=sys.stderr
             )
 

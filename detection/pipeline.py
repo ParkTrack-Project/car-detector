@@ -927,6 +927,7 @@ def run_single_frame_pipeline(args):
         tuple:
             result_payload (dict): JSON-словарь результата.
             visualization_frame_bgr (np.ndarray): Визуализированный кадр.
+            source_frame: Оригинальный кадр с камеры (без визуализаций)
     """
     base_api_url = args.base_api_url
 
@@ -967,7 +968,7 @@ def run_single_frame_pipeline(args):
     out_dir = None
     final_img_path = None
 
-    # 3. Три кадра с интервалом примерно 2 секунды из одного потока
+    # 3. Три кадра с интервалом примерно 10 секунд из одного потока
     targets = [0.0, 10.0, 20.0]
     frames_bgr = grab_frames_any(video_source_url, targets, headers=None)
     first_frame_bgr = frames_bgr[0]
@@ -1161,4 +1162,6 @@ def run_single_frame_pipeline(args):
         observed_at_iso=observed_at_iso,
     )
 
-    return result_payload, visualization_frame_bgr
+    source_frame = first_frame_bgr
+
+    return result_payload, visualization_frame_bgr, source_frame
