@@ -37,7 +37,7 @@ from api_client import (
     update_zone_occupancy,
     create_occupancy_observation,
 )
-from snapshot_storage import (
+from public_snapshot_storage import (
     S3SnapshotStorage,
     SnapshotStorageConfig,
     encode_yolo_labels,
