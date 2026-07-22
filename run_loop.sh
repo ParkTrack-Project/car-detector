@@ -2,14 +2,11 @@
 
 WORKERS_COUNT="${CAR_DETECTOR_WORKERS_COUNT:-1}"
 LOOP_DELAY="${CAR_DETECTOR_LOOP_DELAY_SECONDS:-60}"
-IMAGES_DIR="${CAR_DETECTOR_IMAGES_DIRECTORY_PATH:-/var/parktrack/car-detector/images}"
 
 if ! [[ "$WORKERS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
     echo "CAR_DETECTOR_WORKERS_COUNT must be a positive integer"
     exit 1
 fi
-
-mkdir -p "$IMAGES_DIR"
 
 worker_loop() {
     local worker_id="$1"
@@ -21,7 +18,6 @@ worker_loop() {
             --model detection/best_openvino_model/best.xml \
             --base-api-url "$API_URL" \
             --api-token "$API_TOKEN" \
-            --out_img "$IMAGES_DIR" \
             --device "CPU"
 
         echo "Worker ${worker_id} finished cycle. Sleeping ${LOOP_DELAY}s..."

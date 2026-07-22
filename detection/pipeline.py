@@ -37,14 +37,14 @@ from api_client import (
     update_zone_occupancy,
     create_occupancy_observation,
 )
+from snapshot_storage import (
+    S3SnapshotStorage,
+    SnapshotStorageConfig,
+    encode_yolo_labels,
+)
 
 
 # ---------- Вспомогательные шаги пайплайна ----------
-
-import time
-import cv2
-import numpy as np
-import requests
 
 
 def fetch_image_bgr(url: str, timeout: float = 10.0, headers: dict | None = None) -> np.ndarray:
@@ -931,6 +931,9 @@ def run_single_frame_pipeline(args):
     """
     base_api_url = args.base_api_url
 
+    # Проверяем S3-конфигурацию до получения кадров и запуска инференса.
+    snapshot_storage = S3SnapshotStorage(SnapshotStorageConfig.from_environment())
+
     # 1. HTTP-сессия
     http_session = setup_http_session(args.api_token)
 
@@ -964,12 +967,9 @@ def run_single_frame_pipeline(args):
         flush=True,
     )
 
-    # Подготовка путей сохранения (папка берётся из --out_img)
-    out_dir = None
-    final_img_path = None
-
     # 3. Три кадра с интервалом примерно 10 секунд из одного потока
     targets = [0.0, 10.0, 20.0]
+    snapshot_captured_at = datetime.now(timezone.utc)
     frames_bgr = grab_frames_any(video_source_url, targets, headers=None)
     first_frame_bgr = frames_bgr[0]
     frame_height, frame_width = first_frame_bgr.shape[:2]
@@ -1083,34 +1083,6 @@ def run_single_frame_pipeline(args):
         min_appearances=2,
     )
 
-    # 8. Отладочные кадры до агрегации
-    if args.debug and out_dir is not None:
-        for idx, (frame_bgr, boxes, scores, class_ids) in enumerate(
-                zip(frames_bgr, all_boxes_full, all_scores, all_class_ids),
-                start=1,
-        ):
-            debug_frame = frame_bgr.copy()
-            for box, score, cls_id in zip(boxes, scores, class_ids):
-                if 0 <= int(cls_id) < len(class_names):
-                    cls_name = class_names[int(cls_id)]
-                else:
-                    cls_name = str(int(cls_id))
-                score_percent = int(round(float(score) * 100))
-                label = f"{cls_name} {score_percent}%"
-
-                draw_box_with_alpha(
-                    debug_frame,
-                    box,
-                    label,
-                    edge_color_bgr=(0, 255, 0),
-                    fill_color_bgr=None,
-                    alpha=0.0,
-                    thickness=2,
-                )
-
-            debug_path = out_dir / f"{camera_id}_debug{idx}.jpg"
-            cv2.imwrite(str(debug_path), debug_frame)
-
     # 9. Назначение машин зонам
     zone_statistics, car_assigned_zone_indices = assign_detections_to_zones(
         bounding_boxes_xyxy,
@@ -1154,6 +1126,26 @@ def run_single_frame_pipeline(args):
         observed_at_iso=observed_at_iso,
     )
 
+    # Оригинал, визуализация и YOLO-разметка шифруются в памяти и только после
+    # этого загружаются в S3. Незашифрованные файлы на диск не пишутся.
+    labels_yolo = encode_yolo_labels(
+        bounding_boxes_xyxy,
+        detection_class_ids,
+        image_width=frame_width,
+        image_height=frame_height,
+    )
+    stored_snapshots = snapshot_storage.store_pair(
+        camera_id=camera_id,
+        captured_at=snapshot_captured_at,
+        raw_frame_bgr=first_frame_bgr,
+        annotated_frame_bgr=visualization_frame_bgr,
+        labels_yolo=labels_yolo,
+    )
+    result_payload["snapshots"] = {
+        variant: snapshot.as_dict()
+        for variant, snapshot in stored_snapshots.items()
+    }
+
     # 13. Отправка в API: наблюдение в /occupancy/new + апдейт зоны в /zones/{id}
     push_zone_updates_to_api(
         http_session,
@@ -1162,6 +1154,4 @@ def run_single_frame_pipeline(args):
         observed_at_iso=observed_at_iso,
     )
 
-    source_frame = first_frame_bgr
-
-    return result_payload, visualization_frame_bgr, source_frame
+    return result_payload, visualization_frame_bgr

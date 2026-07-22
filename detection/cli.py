@@ -69,17 +69,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Прозрачность заливки прямоугольников машин"
     )
     argument_parser.add_argument(
-        "--out_img",
-        default="",
-        help="Путь к папке для сохранения изображений (итог + debug)"
-    )
-    argument_parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Сохранять три промежуточных кадра детекции (до агрегации)"
-    )
-
-    argument_parser.add_argument(
         "--show",
         action="store_true",
         help="Показать окно с визуализацией кадра"
