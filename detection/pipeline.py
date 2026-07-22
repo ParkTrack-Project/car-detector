@@ -854,6 +854,8 @@ def push_zone_updates_to_api(
     base_api_url: str,
     zone_statistics: List[Dict[str, Any]],
     observed_at_iso: str,
+    snapshots: Dict[str, Dict[str, str]],
+    detected_cars_count: int,
 ) -> None:
     """
     Проходит по всем зонам и публикует результаты детекции в API двумя шагами:
@@ -904,6 +906,8 @@ def push_zone_updates_to_api(
                 metadata={
                     "writer": "detection_pipeline",
                     "action": "zone_occupancy_update",
+                    "detected_cars_count": detected_cars_count,
+                    "snapshots": snapshots,
                 },
             )
         except Exception as exception:
@@ -1152,6 +1156,8 @@ def run_single_frame_pipeline(args):
         base_api_url,
         zone_statistics,
         observed_at_iso=observed_at_iso,
+        snapshots=result_payload["snapshots"],
+        detected_cars_count=result_payload["totals"]["cars_detected"],
     )
 
     return result_payload, visualization_frame_bgr
